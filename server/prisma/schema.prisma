@@ -1,0 +1,294 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// FoodiePOP — Prisma Schema (v1: menú)
+// Etapa: Restaurant · Category · Product · ProductOption
+// Pendiente para próximas etapas: User · Order · OrderItem · Coupon · Goal
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Usuario y Autenticación ─────────────────────────────────────────────────
+
+enum Role {
+  CLIENT
+  ADMIN
+  SUPERADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  role         Role     @default(CLIENT)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders       Order[]
+  memberships  UserRestaurantRole[]
+
+  @@map("users")
+}
+
+// ─── Restaurante ─────────────────────────────────────────────────────────────
+
+model Restaurant {
+  id          String           @id @default(cuid())
+  slug        String           @unique
+  name        String
+  description String?
+  logoUrl     String?
+  bannerUrl   String?
+  status      RestaurantStatus @default(OPEN)
+  schedule    String?
+  phone       String?
+  address     String?
+  deliveryFee Int              @default(4000) // Precio en COP (sin decimales)
+  monthlyGoal Int              @default(5000000) // Meta mensual de ventas en COP
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  categories   Category[]
+  products     Product[]
+  orders       Order[]
+  coupons      Coupon[]
+  memberships  UserRestaurantRole[]
+  orderCounter RestaurantOrderCounter?
+
+  @@map("restaurants")
+}
+
+enum RestaurantStatus {
+  OPEN
+  CLOSED
+  PAUSED
+}
+
+// ─── Categoría del menú ──────────────────────────────────────────────────────
+
+model Category {
+  id           String     @id @default(cuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  name         String
+  description  String?
+  imageUrl     String?
+  position     Int        @default(0)
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  products Product[]
+
+  @@unique([restaurantId, name])
+  @@map("categories")
+}
+
+// ─── Producto ─────────────────────────────────────────────────────────────────
+
+model Product {
+  id           String     @id @default(cuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  category     Category   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  categoryId   String
+  name         String
+  description  String?
+  price        Int // Precio de venta en COP
+  cost         Int? // Costo de producción en COP (opcional)
+  imageUrl     String?
+  available    Boolean    @default(true) // Disponible en este momento (puede cambiar en tiempo real)
+  active       Boolean    @default(true) // Publicado en el menú
+  position     Int        @default(0)
+  sold         Int        @default(0) // Contador acumulado de unidades vendidas
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  options    ProductOption[]
+  orderItems OrderItem[]
+
+  @@unique([restaurantId, name])
+  @@map("products")
+}
+
+// ─── Opciones / Adicionales de producto ──────────────────────────────────────
+
+model ProductOption {
+  id        String   @id @default(cuid())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  name      String
+  price     Int // Precio adicional en COP
+  cost      Int? // Costo de producción del adicional
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, name])
+  @@map("product_options")
+}
+
+// ─── Pedidos / Órdenes ────────────────────────────────────────────────────────
+
+enum OrderStatus {
+  RECEIVED
+  CONFIRMED
+  PREPARING
+  READY
+  ON_THE_WAY
+  DELIVERED
+  CANCELLED
+}
+
+enum OrderType {
+  PICKUP
+  DELIVERY
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String
+  userId          String
+  restaurantId    String
+  status          OrderStatus @default(RECEIVED)
+  orderType       OrderType   @default(PICKUP)
+
+  customerName    String
+  customerPhone   String
+  deliveryAddress String?
+  deliveryRef     String?
+  notes           String?
+  paymentMethod   String      @default("cash")
+
+  subtotal        Int         // En COP
+  discount        Int         @default(0) // Descuento aplicado en COP
+  deliveryFee     Int         @default(0)
+  total           Int         // (subtotal - discount) + deliveryFee en COP
+
+  couponId        String?
+  couponCode      String?     // Código legible del cupón al momento de compra
+  couponSnapshot  Json?       // Snapshot histórico: { id, code, discountType, discountValue, discountApplied }
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user            User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  restaurant      Restaurant  @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  coupon          Coupon?     @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  items           OrderItem[]
+
+  @@unique([restaurantId, orderNumber])
+  @@index([userId])
+  @@index([restaurantId])
+  @@index([status])
+  @@index([couponId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id              String   @id @default(cuid())
+  orderId         String
+  productId       String
+
+  name            String   // Nombre histórico al momento del pedido
+  unitPrice       Int      // Precio base unitario en COP
+  quantity        Int      // Cantidad > 0
+  subtotal        Int      // (unitPrice + adicionales) * quantity
+  notes           String?
+  selectedOptions Json?    // Snapshot histórico: [{ id, name, price }]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+// ─── Membresías y Roles por Restaurante (Multi-Tenant) ───────────────────────
+
+enum RestaurantRole {
+  OWNER
+  MANAGER
+  KITCHEN
+}
+
+model UserRestaurantRole {
+  id           String         @id @default(cuid())
+  userId       String
+  restaurantId String
+  role         RestaurantRole @default(MANAGER)
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant   Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, restaurantId])
+  @@index([userId])
+  @@index([restaurantId])
+  @@map("user_restaurant_roles")
+}
+
+// ─── Contador Atómico de Pedidos por Restaurante ──────────────────────────────
+
+model RestaurantOrderCounter {
+  id           String     @id @default(cuid())
+  restaurantId String     @unique
+  lastNumber   BigInt     @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@map("restaurant_order_counters")
+}
+
+// ─── Cupones y Descuentos por Restaurante ─────────────────────────────────────
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+model Coupon {
+  id                 String       @id @default(cuid())
+  restaurantId       String
+  code               String
+  description        String?
+  discountType       DiscountType @default(FIXED)
+  discountValue      Int          // Valor en COP o porcentaje (1-100)
+  minimumOrderAmount Int          @default(0) // Compra mínima en COP
+  maximumDiscount    Int?         // Tope máximo en COP para porcentajes
+  startDate          DateTime     @default(now())
+  endDate            DateTime?
+  usageLimit         Int?         // Límite total de usos (null = ilimitado)
+  usageCount         Int          @default(0) // Contador de usos
+  active             Boolean      @default(true)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  restaurant         Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  orders             Order[]
+
+  @@unique([restaurantId, code])
+  @@index([restaurantId])
+  @@index([code])
+  @@map("coupons")
+}
+
+
